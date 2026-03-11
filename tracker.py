@@ -116,9 +116,11 @@ def fetch_articles(lookback_hours: int, max_articles: int) -> list[dict]:
 
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
-DAILY_PROMPT = """You are a sharp tech analyst with strong opinions. You will receive today's TechCrunch articles.
+DAILY_PROMPT = """You are a sharp tech analyst with strong opinions. You will receive today's articles from TechCrunch, Sifted, and the Financial Times.
 
 Write a daily briefing. Be direct, opinionated, and willing to call out hype or contrarian signals. Sound like a smart colleague, not a press release.
+
+When referencing a specific story, briefly attribute the source inline — e.g. "TechCrunch reports...", "According to the FT...", "Sifted notes...". Don't do this for every sentence, only when it adds useful context or when sources diverge.
 
 Structure:
 
@@ -145,6 +147,8 @@ Articles:
 WEEKLY_PROMPT = """You are a sharp, opinionated tech analyst writing a weekly column called "This Week in Tech." Your reader is a VC/startup professional who wants signal over noise — balanced across venture, technology, and macro/policy, but with no patience for fluff. You're willing to be contrarian, call out hype, and say what others won't.
 
 Articles come from three sources: TechCrunch (global tech news), Sifted (European startup focus), and the Financial Times (macro, policy, markets). Weigh all three, but note when a story is distinctly European vs. global, and when the FT's macro angle adds context that TechCrunch misses.
+
+When referencing a specific story, briefly attribute the source inline — e.g. "TechCrunch reports...", "The FT notes...", "Sifted's coverage suggests...". Don't over-attribute — only do it when the source perspective is meaningful or when sources diverge on the same topic.
 
 Two topics always get a dedicated callout if they appeared this week: Climate Tech and European Startups.
 
@@ -187,9 +191,10 @@ Articles from this week:
 def analyze_articles(articles: list[dict], mode: str, week_range: str = "") -> str:
     formatted = []
     for i, a in enumerate(articles, 1):
-        pub = a["published"][:10] if a["published"] else "?"
+        pub   = a["published"][:10] if a["published"] else "?"
+        badge = SOURCE_BADGE.get(a.get("source", ""), "?")
         formatted.append(
-            f"{i}. [{a['category']}] [{pub}] {a['title']}\n   {a['snippet'][:350]}"
+            f"{i}. [{badge}] [{a['category']}] [{pub}] {a['title']}\n   {a['snippet'][:350]}"
         )
 
     if mode == "weekly":
@@ -219,6 +224,27 @@ def notion_request(method: str, path: str, body: dict = None):
     except urllib.error.HTTPError as e:
         print(f"[ERROR] Notion {method} {path}: {e.code} {e.read().decode()}")
         raise
+
+
+SOURCE_BADGE = {
+    "TechCrunch Main":     "TC",
+    "TechCrunch AI":       "TC",
+    "TechCrunch Startups": "TC",
+    "TechCrunch Venture":  "TC",
+    "TechCrunch Climate":  "TC",
+    "Sifted":              "Sifted",
+    "FT Technology":       "FT",
+    "FT Climate Capital":  "FT",
+    "FT Companies":        "FT",
+}
+
+# Special sections that get their own colored callout block in Notion
+SPECIAL_SECTIONS = {
+    "CLIMATE TECH CORNER": ("🌱", "green_background"),
+    "EUROPE WATCH":        ("🇪🇺", "blue_background"),
+    "THE CONTRARIAN TAKE": ("⚡", "yellow_background"),
+    "TL;DR":               ("💡", "purple_background"),
+}
 
 
 def text_block(content: str) -> dict:
@@ -251,24 +277,83 @@ def callout_block(content: str, emoji: str = "📡", color: str = "gray_backgrou
     }
 
 
+def toggle_block(heading: str, children: list[dict]) -> dict:
+    """A collapsible toggle block with nested children."""
+    return {
+        "object": "block",
+        "type": "toggle",
+        "toggle": {
+            "rich_text": [{"type": "text", "text": {"content": heading},
+                           "annotations": {"bold": True}}],
+            "children": children,
+        },
+    }
+
+
 def parse_analysis_to_blocks(analysis: str) -> list[dict]:
-    """Convert markdown-style analysis text into Notion blocks."""
-    blocks = []
-    for line in analysis.split("\n"):
-        line = line.strip()
+    """
+    Convert markdown-style analysis text into Notion blocks with:
+    - H2 for all section headings (scannable)
+    - Dividers between every section
+    - Colored callout blocks for special sections (TL;DR, Climate, Europe, Contrarian)
+    - Plain paragraphs for body text
+    """
+    blocks       = []
+    lines        = analysis.split("\n")
+    i            = 0
+    in_special   = None   # tracks if we're collecting body for a special section
+    special_body = []
+
+    def flush_special():
+        """Emit a colored callout for the accumulated special section body."""
+        nonlocal in_special, special_body
+        if in_special and special_body:
+            emoji, color = SPECIAL_SECTIONS[in_special]
+            body_text    = " ".join(special_body).strip()
+            if body_text:
+                blocks.append(callout_block(body_text, emoji=emoji, color=color))
+            blocks.append(divider_block())
+        in_special   = None
+        special_body = []
+
+    while i < len(lines):
+        line = lines[i].strip()
+        i   += 1
+
         if not line:
             continue
-        # Match **HEADING** or **HEADING** with trailing text
-        if re.match(r"^\*\*[^*]+\*\*$", line):
-            clean = line.strip("*").strip()
-            # Top-level title gets h2, sub-sections get h3
-            level = 2 if line.isupper() or "THIS WEEK" in line else 3
-            blocks.append(heading_block(clean, level=level))
-        elif line.startswith("**") and "**" in line[2:]:
-            clean = re.sub(r"\*\*", "", line).strip()
-            blocks.append(heading_block(clean, level=3))
+
+        # Detect a heading line: **HEADING** or **HEADING TEXT**
+        heading_match = re.match(r"^\*\*([^*]+)\*\*$", line)
+        if heading_match:
+            clean = heading_match.group(1).strip()
+            upper = clean.upper()
+
+            # Flush any in-progress special section
+            flush_special()
+
+            # Check if this is a special section
+            matched_special = next(
+                (k for k in SPECIAL_SECTIONS if k in upper), None
+            )
+
+            if matched_special:
+                in_special   = matched_special
+                special_body = []
+                # Don't emit a heading block — the callout carries it
+            else:
+                # Normal section: H2 heading + divider above
+                if blocks and blocks[-1].get("type") != "divider":
+                    blocks.append(divider_block())
+                blocks.append(heading_block(clean, level=2))
         else:
-            blocks.append(text_block(line))
+            # Body text
+            if in_special is not None:
+                special_body.append(line)
+            else:
+                blocks.append(text_block(line))
+
+    flush_special()
     return blocks
 
 
@@ -279,29 +364,31 @@ def build_notion_page(
     callout_text: str,
     emoji: str,
 ) -> dict:
-    blocks = [
-        callout_block(callout_text, emoji=emoji),
-        divider_block(),
-        *parse_analysis_to_blocks(analysis),
-        divider_block(),
-        heading_block("Articles Covered", level=3),
-    ]
-
+    # Group articles by source badge for the toggle
+    article_blocks = []
     for a in articles:
-        pub = a["published"][:10] if a["published"] else ""
-        blocks.append({
+        pub    = a["published"][:10] if a["published"] else ""
+        badge  = SOURCE_BADGE.get(a.get("source", ""), "?")
+        label  = f"[{badge}] {pub} — {a['title']}"
+        article_blocks.append({
             "object": "block",
             "type": "bulleted_list_item",
             "bulleted_list_item": {
                 "rich_text": [{
                     "type": "text",
-                    "text": {
-                        "content": f"[{a['category']}] {pub} — {a['title']}",
-                        "link": {"url": a["url"]},
-                    },
+                    "text": {"content": label, "link": {"url": a["url"]}},
                 }]
             },
         })
+
+    blocks = [
+        callout_block(callout_text, emoji=emoji),
+        divider_block(),
+        *parse_analysis_to_blocks(analysis),
+        divider_block(),
+        # Collapsible article list — keeps the page clean when scanning
+        toggle_block(f"📋 {len(articles)} articles analyzed", article_blocks[:95]),
+    ]
 
     return {
         "parent": {"page_id": NOTION_PARENT_PAGE},
