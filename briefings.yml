@@ -1,0 +1,48 @@
+name: TechCrunch Briefings
+
+on:
+  schedule:
+    # Daily briefing — 07:00 UTC (08:00 CET / 09:00 CEST), Tue–Sun
+    - cron: "0 7 * * 2-7"
+    # Weekly briefing — 07:00 UTC Monday (recaps the previous week)
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode (daily or weekly)"
+        required: false
+        default: "auto"
+        type: choice
+        options: [auto, daily, weekly]
+
+jobs:
+  run-tracker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tracker
+        env:
+          ANTHROPIC_API_KEY:     ${{ secrets.ANTHROPIC_API_KEY }}
+          NOTION_TOKEN:          ${{ secrets.NOTION_TOKEN }}
+          NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
+        run: |
+          MODE="${{ github.event.inputs.mode }}"
+          if [ "$MODE" = "weekly" ]; then
+            python tracker.py --weekly
+          elif [ "$MODE" = "daily" ]; then
+            python tracker.py --daily
+          else
+            python tracker.py
+          fi
