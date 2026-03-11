@@ -294,6 +294,36 @@ def build_notion_page(
     }
 
 
+def update_parent_page_description(week_range: str, article_count: int) -> None:
+    """Append a short description block to the parent Notion page each week."""
+    today = datetime.date.today().strftime("%A, %d %B %Y")
+    description = (
+        f"This page contains daily and weekly tech briefings generated from TechCrunch and Sifted, "
+        f"analyzed by Claude. Covers AI, venture, climate tech, and European startups. "
+        f"Last weekly briefing: week of {week_range}, posted {today} · {article_count} articles analyzed."
+    )
+
+    # Overwrite the parent page's description by appending a callout at the top
+    body = {
+        "children": [
+            {
+                "object": "block",
+                "type": "callout",
+                "callout": {
+                    "rich_text": [{"type": "text", "text": {"content": description}}],
+                    "icon": {"type": "emoji", "emoji": "🗞️"},
+                    "color": "blue_background",
+                },
+            }
+        ]
+    }
+    try:
+        notion_request("PATCH", f"/blocks/{NOTION_PARENT_PAGE}/children", body)
+        print("[INFO] Parent page description updated.")
+    except Exception as e:
+        print(f"[WARN] Could not update parent page description: {e}")
+
+
 def post_to_notion(analysis: str, articles: list[dict], mode: str, week_range: str = "") -> str:
     today = datetime.date.today()
 
@@ -313,6 +343,10 @@ def post_to_notion(analysis: str, articles: list[dict], mode: str, week_range: s
     result   = notion_request("POST", "/pages", page_payload)
     page_url = result.get("url", "")
     print(f"[INFO] Notion page created: {page_url}")
+
+    if mode == "weekly":
+        update_parent_page_description(week_range, len(articles))
+
     return page_url
 
 
