@@ -33,6 +33,16 @@ RSS_FEEDS = [
     ("TechCrunch Venture",  "https://techcrunch.com/category/venture/feed/"),
     ("TechCrunch Climate",  "https://techcrunch.com/category/climate/feed/"),
     ("Sifted",              "https://sifted.eu/feed/?post_type=article"),
+    ("FT Technology",       "https://www.ft.com/technology?format=rss"),
+    ("FT Climate Capital",  "https://www.ft.com/climate-capital?format=rss"),
+    ("FT Companies",        "https://www.ft.com/companies/technology?format=rss"),
+]
+
+# Keywords to filter FT articles — only include if title/snippet matches at least one
+FT_RELEVANT_KEYWORDS = [
+    "startup", "venture", "vc ", "funding", "investment", "raise", "series",
+    "ai ", "artificial intelligence", "climate", "energy", "fintech", "saas",
+    "europe", "european", "ipo", "acquisition", "tech", "software", "deeptech",
 ]
 
 DAILY_MAX_ARTICLES  = 40
@@ -79,12 +89,21 @@ def fetch_articles(lookback_hours: int, max_articles: int) -> list[dict]:
                 if hasattr(entry, "tags") and entry.tags:
                     category = entry.tags[0].get("term", category)
 
+                title_text = entry.get("title", "").strip()
+                combined   = (title_text + " " + text).lower()
+
+                # For FT feeds, only include topically relevant articles
+                if source.startswith("FT"):
+                    if not any(kw in combined for kw in FT_RELEVANT_KEYWORDS):
+                        continue
+
                 articles.append({
-                    "title":     entry.get("title", "").strip(),
+                    "title":     title_text,
                     "url":       link,
                     "snippet":   text,
                     "category":  category,
                     "published": published.isoformat() if published else "",
+                    "source":    source,
                 })
         except Exception as e:
             print(f"[WARN] Failed to fetch {source}: {e}")
@@ -125,7 +144,7 @@ Articles:
 
 WEEKLY_PROMPT = """You are a sharp, opinionated tech analyst writing a weekly column called "This Week in Tech." Your reader is a VC/startup professional who wants signal over noise — balanced across venture, technology, and macro/policy, but with no patience for fluff. You're willing to be contrarian, call out hype, and say what others won't.
 
-Articles come from two sources: TechCrunch (global tech news) and Sifted (European startup focus). Weigh both, but note when a story is distinctly European vs. global.
+Articles come from three sources: TechCrunch (global tech news), Sifted (European startup focus), and the Financial Times (macro, policy, markets). Weigh all three, but note when a story is distinctly European vs. global, and when the FT's macro angle adds context that TechCrunch misses.
 
 Two topics always get a dedicated callout if they appeared this week: Climate Tech and European Startups.
 
@@ -295,31 +314,65 @@ def build_notion_page(
 
 
 def update_parent_page_description(week_range: str, article_count: int) -> None:
-    """Append a short description block to the parent Notion page each week."""
+    """
+    Place a description callout at the very top of the parent Notion page.
+    Deletes any existing callout block that was previously placed there,
+    then inserts a fresh one above all other content.
+    """
     today = datetime.date.today().strftime("%A, %d %B %Y")
     description = (
-        f"This page contains daily and weekly tech briefings generated from TechCrunch and Sifted, "
-        f"analyzed by Claude. Covers AI, venture, climate tech, and European startups. "
+        f"Daily and weekly tech briefings analyzed by Claude. "
+        f"Sources: TechCrunch · Sifted · Financial Times. "
+        f"Topics: AI, venture capital, climate tech, European startups, fintech, macro & policy. "
         f"Last weekly briefing: week of {week_range}, posted {today} · {article_count} articles analyzed."
     )
 
-    # Overwrite the parent page's description by appending a callout at the top
-    body = {
-        "children": [
-            {
-                "object": "block",
-                "type": "callout",
-                "callout": {
-                    "rich_text": [{"type": "text", "text": {"content": description}}],
-                    "icon": {"type": "emoji", "emoji": "🗞️"},
-                    "color": "blue_background",
-                },
-            }
-        ]
-    }
     try:
+        # 1. Fetch the first block on the parent page
+        result = notion_request("GET", f"/blocks/{NOTION_PARENT_PAGE}/children?page_size=10")
+        blocks = result.get("results", [])
+
+        # 2. If the first block is already our description callout, delete it
+        if blocks and blocks[0].get("type") == "callout":
+            old_block_id = blocks[0]["id"]
+            try:
+                notion_request("DELETE", f"/blocks/{old_block_id}")
+                print("[INFO] Removed old description callout.")
+            except Exception as e:
+                print(f"[WARN] Could not delete old callout: {e}")
+
+        # 3. Get the current first block id to use as anchor (insert before it)
+        #    Notion API doesn't support "prepend" directly, but we can use
+        #    after: None to prepend by not passing after (inserts at top)
+        new_callout = {
+            "object": "block",
+            "type": "callout",
+            "callout": {
+                "rich_text": [{"type": "text", "text": {"content": description}}],
+                "icon": {"type": "emoji", "emoji": "🗞️"},
+                "color": "blue_background",
+            },
+        }
+
+        # Re-fetch first block after potential deletion
+        result2  = notion_request("GET", f"/blocks/{NOTION_PARENT_PAGE}/children?page_size=1")
+        blocks2  = result2.get("results", [])
+        first_id = blocks2[0]["id"] if blocks2 else None
+
+        if first_id:
+            # Insert after the page itself but before the first block
+            # Notion's append endpoint always appends; to prepend we use
+            # block children patch with after="" (empty string = prepend)
+            body = {
+                "children": [new_callout],
+                "after": "",  # empty string means insert at the very top
+            }
+        else:
+            body = {"children": [new_callout]}
+
         notion_request("PATCH", f"/blocks/{NOTION_PARENT_PAGE}/children", body)
-        print("[INFO] Parent page description updated.")
+        print("[INFO] Parent page description updated at top.")
+
     except Exception as e:
         print(f"[WARN] Could not update parent page description: {e}")
 
@@ -328,13 +381,13 @@ def post_to_notion(analysis: str, articles: list[dict], mode: str, week_range: s
     today = datetime.date.today()
 
     if mode == "weekly":
-        title        = f"This Week on TechCrunch & Sifted — {week_range}"
-        callout_text = f"📰 Weekly briefing · {len(articles)} articles · TechCrunch + Sifted · {week_range}"
+        title        = f"This Week in Tech — {week_range}"
+        callout_text = f"📰 Weekly briefing · {len(articles)} articles · TechCrunch + Sifted + FT · {week_range}"
         emoji        = "🗞️"
     else:
         date_str     = today.strftime("%d %b %Y")
-        title        = f"TC & Sifted Briefing — {date_str}"
-        callout_text = f"📰 {len(articles)} articles analyzed · TechCrunch + Sifted · {today.strftime('%A, %d %B %Y')}"
+        title        = f"Tech Briefing — {date_str}"
+        callout_text = f"📰 {len(articles)} articles analyzed · TechCrunch + Sifted + FT · {today.strftime('%A, %d %B %Y')}"
         emoji        = "📰"
 
     page_payload = build_notion_page(analysis, articles, title, callout_text, emoji)
