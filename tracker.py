@@ -199,10 +199,10 @@ def analyze_articles(articles: list[dict], mode: str, week_range: str = "") -> s
 
     if mode == "weekly":
         prompt = WEEKLY_PROMPT.replace("{week_range}", week_range) + "\n\n".join(formatted)
-        max_tokens = 2200
+        max_tokens = 3000
     else:
         prompt = DAILY_PROMPT + "\n\n".join(formatted)
-        max_tokens = 1500
+        max_tokens = 1800
 
     print(f"[INFO] Sending {len(articles)} articles to Claude ({mode} mode)...")
     response = client.messages.create(
@@ -240,11 +240,12 @@ SOURCE_BADGE = {
 
 # Special sections that get their own colored callout block in Notion
 SPECIAL_SECTIONS = {
-    "CLIMATE TECH CORNER": ("🌱", "green_background"),
-    "EUROPE WATCH":        ("🇪🇺", "blue_background"),
-    "THE CONTRARIAN TAKE": ("⚡", "yellow_background"),
-    "TL;DR":               ("💡", "purple_background"),
-    "ONE TO WATCH":        ("👀", "orange_background"),
+    "CLIMATE TECH CORNER":    ("🌱", "green_background"),
+    "EUROPE WATCH":           ("🇪🇺", "blue_background"),
+    "THE CONTRARIAN TAKE":    ("⚡", "yellow_background"),
+    "TL;DR":                  ("💡", "purple_background"),
+    "ONE TO WATCH NEXT WEEK": ("👀", "orange_background"),
+    "ONE TO WATCH":           ("👀", "orange_background"),
 }
 
 
