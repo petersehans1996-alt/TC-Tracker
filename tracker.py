@@ -32,6 +32,7 @@ RSS_FEEDS = [
     ("TechCrunch Startups", "https://techcrunch.com/category/startups/feed/"),
     ("TechCrunch Venture",  "https://techcrunch.com/category/venture/feed/"),
     ("TechCrunch Climate",  "https://techcrunch.com/category/climate/feed/"),
+    ("Sifted",              "https://sifted.eu/feed/?post_type=article"),
 ]
 
 DAILY_MAX_ARTICLES  = 40
@@ -122,7 +123,9 @@ Use prose throughout — no bullet lists for sections 1, 3, or 4.
 Articles:
 """
 
-WEEKLY_PROMPT = """You are a sharp, opinionated tech analyst writing a weekly column called "This Week on TechCrunch." Your reader is a VC/startup professional who wants signal over noise — balanced across venture, technology, and macro/policy, but with no patience for fluff. You're willing to be contrarian, call out hype, and say what others won't.
+WEEKLY_PROMPT = """You are a sharp, opinionated tech analyst writing a weekly column called "This Week in Tech." Your reader is a VC/startup professional who wants signal over noise — balanced across venture, technology, and macro/policy, but with no patience for fluff. You're willing to be contrarian, call out hype, and say what others won't.
+
+Articles come from two sources: TechCrunch (global tech news) and Sifted (European startup focus). Weigh both, but note when a story is distinctly European vs. global.
 
 Two topics always get a dedicated callout if they appeared this week: Climate Tech and European Startups.
 
@@ -295,13 +298,13 @@ def post_to_notion(analysis: str, articles: list[dict], mode: str, week_range: s
     today = datetime.date.today()
 
     if mode == "weekly":
-        title        = f"This Week on TechCrunch — {week_range}"
-        callout_text = f"📰 Weekly briefing · {len(articles)} articles · {week_range}"
+        title        = f"This Week on TechCrunch & Sifted — {week_range}"
+        callout_text = f"📰 Weekly briefing · {len(articles)} articles · TechCrunch + Sifted · {week_range}"
         emoji        = "🗞️"
     else:
         date_str     = today.strftime("%d %b %Y")
-        title        = f"TechCrunch Briefing — {date_str}"
-        callout_text = f"📰 {len(articles)} articles analyzed · {today.strftime('%A, %d %B %Y')}"
+        title        = f"TC & Sifted Briefing — {date_str}"
+        callout_text = f"📰 {len(articles)} articles analyzed · TechCrunch + Sifted · {today.strftime('%A, %d %B %Y')}"
         emoji        = "📰"
 
     page_payload = build_notion_page(analysis, articles, title, callout_text, emoji)
