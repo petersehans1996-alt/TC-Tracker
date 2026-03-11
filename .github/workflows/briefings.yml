@@ -1,12 +1,20 @@
 name: TechCrunch Briefings
 
 on:
- schedule:
+  schedule:
     # Daily briefing — 07:00 UTC (08:00 CET), Tue–Sun
     - cron: "0 7 * * 2-6"
     - cron: "0 7 * * 0"
     # Weekly briefing — 07:00 UTC Monday
     - cron: "0 7 * * 1"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode (daily or weekly)"
+        required: false
+        default: "auto"
+        type: choice
+        options: [auto, daily, weekly]
 
 jobs:
   run-tracker:
