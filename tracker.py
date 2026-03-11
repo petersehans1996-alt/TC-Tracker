@@ -244,6 +244,7 @@ SPECIAL_SECTIONS = {
     "EUROPE WATCH":        ("🇪🇺", "blue_background"),
     "THE CONTRARIAN TAKE": ("⚡", "yellow_background"),
     "TL;DR":               ("💡", "purple_background"),
+    "ONE TO WATCH":        ("👀", "orange_background"),
 }
 
 
@@ -363,13 +364,17 @@ def build_notion_page(
     title: str,
     callout_text: str,
     emoji: str,
-) -> dict:
-    # Group articles by source badge for the toggle
+) -> tuple:
+    """
+    Returns (page_payload, article_toggle).
+    Analysis blocks go in the initial page creation call (under 100-block limit).
+    The article toggle is appended in a second call to avoid truncation.
+    """
     article_blocks = []
     for a in articles:
-        pub    = a["published"][:10] if a["published"] else ""
-        badge  = SOURCE_BADGE.get(a.get("source", ""), "?")
-        label  = f"[{badge}] {pub} — {a['title']}"
+        pub   = a["published"][:10] if a["published"] else ""
+        badge = SOURCE_BADGE.get(a.get("source", ""), "?")
+        label = f"[{badge}] {pub} — {a['title']}"
         article_blocks.append({
             "object": "block",
             "type": "bulleted_list_item",
@@ -381,23 +386,27 @@ def build_notion_page(
             },
         })
 
-    blocks = [
+    analysis_blocks = [
         callout_block(callout_text, emoji=emoji),
         divider_block(),
         *parse_analysis_to_blocks(analysis),
         divider_block(),
-        # Collapsible article list — keeps the page clean when scanning
-        toggle_block(f"📋 {len(articles)} articles analyzed", article_blocks[:95]),
     ]
 
-    return {
+    page_payload = {
         "parent": {"page_id": NOTION_PARENT_PAGE},
         "icon": {"type": "emoji", "emoji": emoji},
         "properties": {
             "title": {"title": [{"type": "text", "text": {"content": title}}]}
         },
-        "children": blocks[:100],
+        "children": analysis_blocks[:100],
     }
+
+    article_toggle = toggle_block(
+        f"📋 {len(articles)} articles analyzed", article_blocks[:95]
+    )
+
+    return page_payload, article_toggle
 
 
 def update_parent_page_description(week_range: str, article_count: int) -> None:
@@ -477,12 +486,21 @@ def post_to_notion(analysis: str, articles: list[dict], mode: str, week_range: s
         callout_text = f"📰 {len(articles)} articles analyzed · TechCrunch + Sifted + FT · {today.strftime('%A, %d %B %Y')}"
         emoji        = "📰"
 
-    page_payload = build_notion_page(analysis, articles, title, callout_text, emoji)
+    page_payload, article_toggle = build_notion_page(analysis, articles, title, callout_text, emoji)
 
     print("[INFO] Creating Notion page...")
     result   = notion_request("POST", "/pages", page_payload)
     page_url = result.get("url", "")
+    page_id  = result.get("id", "")
     print(f"[INFO] Notion page created: {page_url}")
+
+    # Append article toggle in a second call — avoids hitting Notion's 100-block limit
+    if page_id:
+        try:
+            notion_request("PATCH", f"/blocks/{page_id}/children", {"children": [article_toggle]})
+            print("[INFO] Article toggle appended.")
+        except Exception as e:
+            print(f"[WARN] Could not append article toggle: {e}")
 
     if mode == "weekly":
         update_parent_page_description(week_range, len(articles))
