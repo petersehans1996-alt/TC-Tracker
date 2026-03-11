@@ -102,6 +102,9 @@ Write a daily briefing. Be direct, opinionated, and willing to call out hype or 
 
 Structure:
 
+**TL;DR**
+Two sentences maximum. What is the single most important thing happening in tech today, and what's the mood? This should read like the first line of a memo — crisp, specific, no filler.
+
 **1. OVERALL SENTIMENT**
 One paragraph on the mood of today's tech news. Reference specific stories. Don't be bland.
 
@@ -127,6 +130,9 @@ Write the weekly briefing with the following structure:
 
 **THIS WEEK ON TECHCRUNCH**
 Week of {week_range}
+
+**TL;DR**
+Two sentences maximum. What defined this week in tech, and what does it signal? Write it like the opening line of an investor memo — specific, opinionated, no throat-clearing.
 
 **THE WEEK IN ONE PARAGRAPH**
 A crisp, opinionated paragraph that captures the dominant energy of the week. What was the overarching story? Was it a good week for tech, a bad one, or complicated? Reference the biggest signals.
