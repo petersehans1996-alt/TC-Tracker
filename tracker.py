@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import json
+import time
 import hashlib
 import datetime
 import feedparser
@@ -49,6 +50,11 @@ DAILY_MAX_ARTICLES  = 40
 WEEKLY_MAX_ARTICLES = 120  # broader net over 7 days
 DAILY_LOOKBACK_H    = 26
 WEEKLY_LOOKBACK_H   = 7 * 24 + 4  # 7 days + buffer
+
+# Notion block chunk size — API enforces max 100 children per request
+NOTION_CHUNK_SIZE = 100
+# Brief pause between consecutive Notion PATCH calls to avoid rate-limiting
+NOTION_CHUNK_DELAY = 0.35  # seconds
 
 client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -188,6 +194,7 @@ Tone: sharp, direct, confident. Write like you have a strong point of view and a
 Articles from this week:
 """
 
+
 def analyze_articles(articles: list[dict], mode: str, week_range: str = "") -> str:
     formatted = []
     for i, a in enumerate(articles, 1):
@@ -198,11 +205,11 @@ def analyze_articles(articles: list[dict], mode: str, week_range: str = "") -> s
         )
 
     if mode == "weekly":
-        prompt = WEEKLY_PROMPT.replace("{week_range}", week_range) + "\n\n".join(formatted)
-        max_tokens = 3000
+        prompt     = WEEKLY_PROMPT.replace("{week_range}", week_range) + "\n\n".join(formatted)
+        max_tokens = 8000   # increased from 4000 to avoid mid-response cutoff
     else:
-        prompt = DAILY_PROMPT + "\n\n".join(formatted)
-        max_tokens = 1800
+        prompt     = DAILY_PROMPT + "\n\n".join(formatted)
+        max_tokens = 4000   # increased from 2000 to avoid mid-response cutoff
 
     print(f"[INFO] Sending {len(articles)} articles to Claude ({mode} mode)...")
     response = client.messages.create(
@@ -210,6 +217,12 @@ def analyze_articles(articles: list[dict], mode: str, week_range: str = "") -> s
         max_tokens=max_tokens,
         messages=[{"role": "user", "content": prompt}],
     )
+
+    # Warn if Claude hit the token ceiling mid-response
+    stop_reason = response.stop_reason
+    if stop_reason == "max_tokens":
+        print("[WARN] Claude hit max_tokens — output may be truncated. Consider raising max_tokens further.")
+
     return response.content[0].text
 
 
@@ -359,18 +372,50 @@ def parse_analysis_to_blocks(analysis: str) -> list[dict]:
     return blocks
 
 
-def build_notion_page(
-    analysis: str,
-    articles: list[dict],
-    title: str,
-    callout_text: str,
-    emoji: str,
-) -> tuple:
+def append_blocks_chunked(page_id: str, blocks: list[dict], label: str = "blocks") -> None:
     """
-    Returns (page_payload, article_toggle).
-    Analysis blocks go in the initial page creation call (under 100-block limit).
-    The article toggle is appended in a second call to avoid truncation.
+    Append an arbitrary number of blocks to a Notion page by splitting into
+    NOTION_CHUNK_SIZE batches. A short delay between calls prevents rate-limiting.
     """
+    total = len(blocks)
+    if total == 0:
+        return
+
+    for start in range(0, total, NOTION_CHUNK_SIZE):
+        chunk = blocks[start:start + NOTION_CHUNK_SIZE]
+        try:
+            notion_request("PATCH", f"/blocks/{page_id}/children", {"children": chunk})
+            end = min(start + NOTION_CHUNK_SIZE, total)
+            print(f"[INFO] Appended {label} blocks {start + 1}–{end} of {total}.")
+        except Exception as e:
+            print(f"[WARN] Could not append {label} chunk starting at {start}: {e}")
+        if start + NOTION_CHUNK_SIZE < total:
+            time.sleep(NOTION_CHUNK_DELAY)
+
+
+def post_to_notion(analysis: str, articles: list[dict], mode: str, week_range: str = "") -> str:
+    today = datetime.date.today()
+
+    if mode == "weekly":
+        title        = f"This Week in Tech — {week_range}"
+        callout_text = f"📰 Weekly briefing · {len(articles)} articles · TechCrunch + Sifted + FT · {week_range}"
+        emoji        = "🗞️"
+    else:
+        date_str     = today.strftime("%d %b %Y")
+        title        = f"Tech Briefing — {date_str}"
+        callout_text = f"📰 {len(articles)} articles analyzed · TechCrunch + Sifted + FT · {today.strftime('%A, %d %B %Y')}"
+        emoji        = "📰"
+
+    # Build the full list of analysis blocks — no slicing here
+    all_analysis_blocks = [
+        callout_block(callout_text, emoji=emoji),
+        divider_block(),
+        *parse_analysis_to_blocks(analysis),
+        divider_block(),
+    ]
+
+    # Build article toggle children (Notion toggle children are capped at 100 inline;
+    # we stay under that limit by capping article list at 95)
     article_blocks = []
     for a in articles:
         pub   = a["published"][:10] if a["published"] else ""
@@ -387,27 +432,50 @@ def build_notion_page(
             },
         })
 
-    analysis_blocks = [
-        callout_block(callout_text, emoji=emoji),
-        divider_block(),
-        *parse_analysis_to_blocks(analysis),
-        divider_block(),
-    ]
-
-    page_payload = {
-        "parent": {"page_id": NOTION_PARENT_PAGE},
-        "icon": {"type": "emoji", "emoji": emoji},
-        "properties": {
-            "title": {"title": [{"type": "text", "text": {"content": title}}]}
-        },
-        "children": analysis_blocks[:100],
-    }
-
     article_toggle = toggle_block(
         f"📋 {len(articles)} articles analyzed", article_blocks[:95]
     )
 
-    return page_payload, article_toggle
+    # ── Step 1: Create the page with the first chunk of analysis blocks ────────
+    first_chunk = all_analysis_blocks[:NOTION_CHUNK_SIZE]
+    remaining   = all_analysis_blocks[NOTION_CHUNK_SIZE:]
+
+    page_payload = {
+        "parent": {"page_id": NOTION_PARENT_PAGE},
+        "icon":   {"type": "emoji", "emoji": emoji},
+        "properties": {
+            "title": {"title": [{"type": "text", "text": {"content": title}}]}
+        },
+        "children": first_chunk,
+    }
+
+    print("[INFO] Creating Notion page...")
+    result   = notion_request("POST", "/pages", page_payload)
+    page_url = result.get("url", "")
+    page_id  = result.get("id", "")
+    print(f"[INFO] Notion page created: {page_url}")
+
+    if not page_id:
+        print("[ERROR] No page_id returned — cannot append remaining blocks.")
+        return page_url
+
+    # ── Step 2: Append any remaining analysis blocks in chunks ─────────────────
+    if remaining:
+        time.sleep(NOTION_CHUNK_DELAY)
+        append_blocks_chunked(page_id, remaining, label="analysis")
+
+    # ── Step 3: Append the article toggle last ─────────────────────────────────
+    time.sleep(NOTION_CHUNK_DELAY)
+    try:
+        notion_request("PATCH", f"/blocks/{page_id}/children", {"children": [article_toggle]})
+        print("[INFO] Article toggle appended.")
+    except Exception as e:
+        print(f"[WARN] Could not append article toggle: {e}")
+
+    if mode == "weekly":
+        update_parent_page_description(week_range, len(articles))
+
+    return page_url
 
 
 def update_parent_page_description(week_range: str, article_count: int) -> None:
@@ -416,7 +484,7 @@ def update_parent_page_description(week_range: str, article_count: int) -> None:
     Deletes any existing callout block that was previously placed there,
     then inserts a fresh one above all other content.
     """
-    today = datetime.date.today().strftime("%A, %d %B %Y")
+    today       = datetime.date.today().strftime("%A, %d %B %Y")
     description = (
         f"Daily and weekly tech briefings analyzed by Claude. "
         f"Sources: TechCrunch · Sifted · Financial Times. "
@@ -438,9 +506,6 @@ def update_parent_page_description(week_range: str, article_count: int) -> None:
             except Exception as e:
                 print(f"[WARN] Could not delete old callout: {e}")
 
-        # 3. Get the current first block id to use as anchor (insert before it)
-        #    Notion API doesn't support "prepend" directly, but we can use
-        #    after: None to prepend by not passing after (inserts at top)
         new_callout = {
             "object": "block",
             "type": "callout",
@@ -457,12 +522,9 @@ def update_parent_page_description(week_range: str, article_count: int) -> None:
         first_id = blocks2[0]["id"] if blocks2 else None
 
         if first_id:
-            # Insert after the page itself but before the first block
-            # Notion's append endpoint always appends; to prepend we use
-            # block children patch with after="" (empty string = prepend)
             body = {
                 "children": [new_callout],
-                "after": "",  # empty string means insert at the very top
+                "after": "",  # empty string = prepend to top
             }
         else:
             body = {"children": [new_callout]}
@@ -474,45 +536,9 @@ def update_parent_page_description(week_range: str, article_count: int) -> None:
         print(f"[WARN] Could not update parent page description: {e}")
 
 
-def post_to_notion(analysis: str, articles: list[dict], mode: str, week_range: str = "") -> str:
-    today = datetime.date.today()
-
-    if mode == "weekly":
-        title        = f"This Week in Tech — {week_range}"
-        callout_text = f"📰 Weekly briefing · {len(articles)} articles · TechCrunch + Sifted + FT · {week_range}"
-        emoji        = "🗞️"
-    else:
-        date_str     = today.strftime("%d %b %Y")
-        title        = f"Tech Briefing — {date_str}"
-        callout_text = f"📰 {len(articles)} articles analyzed · TechCrunch + Sifted + FT · {today.strftime('%A, %d %B %Y')}"
-        emoji        = "📰"
-
-    page_payload, article_toggle = build_notion_page(analysis, articles, title, callout_text, emoji)
-
-    print("[INFO] Creating Notion page...")
-    result   = notion_request("POST", "/pages", page_payload)
-    page_url = result.get("url", "")
-    page_id  = result.get("id", "")
-    print(f"[INFO] Notion page created: {page_url}")
-
-    # Append article toggle in a second call — avoids hitting Notion's 100-block limit
-    if page_id:
-        try:
-            notion_request("PATCH", f"/blocks/{page_id}/children", {"children": [article_toggle]})
-            print("[INFO] Article toggle appended.")
-        except Exception as e:
-            print(f"[WARN] Could not append article toggle: {e}")
-
-    if mode == "weekly":
-        update_parent_page_description(week_range, len(articles))
-
-    return page_url
-
-
 # ── Main ──────────────────────────────────────────────────────────────────────
 def get_week_range() -> str:
     today    = datetime.date.today()
-    # Last Monday to last Sunday
     last_mon = today - datetime.timedelta(days=today.weekday() + 7)
     last_sun = last_mon + datetime.timedelta(days=6)
     return f"{last_mon.strftime('%-d %b')} – {last_sun.strftime('%-d %b %Y')}"
