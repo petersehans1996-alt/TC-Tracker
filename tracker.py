@@ -160,8 +160,8 @@ Two topics always get a dedicated callout if they appeared this week: Climate Te
 
 Write the weekly briefing with the following structure:
 
-**THIS WEEK ON TECHCRUNCH**
-Week of {week_range}
+**THIS WEEK IN TECH**
+Week of {week_range} · Sources: TechCrunch · Sifted · Financial Times
 
 **TL;DR**
 Two sentences maximum. What defined this week in tech, and what does it signal? Write it like the opening line of an investor memo — specific, opinionated, no throat-clearing.
@@ -251,14 +251,16 @@ SOURCE_BADGE = {
     "FT Companies":        "FT",
 }
 
-# Special sections that get their own colored callout block in Notion
+# Special sections rendered as heading_3 title + colored callout body in Notion.
+# ORDER MATTERS: longer keys must come before shorter prefix matches so that
+# "ONE TO WATCH NEXT WEEK" is checked before "ONE TO WATCH".
 SPECIAL_SECTIONS = {
-    "CLIMATE TECH CORNER":    ("🌱", "green_background"),
-    "EUROPE WATCH":           ("🇪🇺", "blue_background"),
-    "THE CONTRARIAN TAKE":    ("⚡", "yellow_background"),
-    "TL;DR":                  ("💡", "purple_background"),
     "ONE TO WATCH NEXT WEEK": ("👀", "orange_background"),
+    "CLIMATE TECH CORNER":    ("🌱", "green_background"),
+    "THE CONTRARIAN TAKE":    ("⚡", "yellow_background"),
+    "EUROPE WATCH":           ("🇪🇺", "blue_background"),
     "ONE TO WATCH":           ("👀", "orange_background"),
+    "TL;DR":                  ("💡", "purple_background"),
 }
 
 
@@ -320,15 +322,15 @@ def parse_analysis_to_blocks(analysis: str) -> list[dict]:
     special_body = []
 
     def flush_special():
-        """Emit a colored callout for the accumulated special section body."""
+        """Emit a heading_3 title block + colored callout body for special sections."""
         nonlocal in_special, special_body
         if in_special and special_body:
             emoji, color = SPECIAL_SECTIONS[in_special]
             body_text    = " ".join(special_body).strip()
             if body_text:
-                # Prepend the section title so the callout is self-explanatory
-                titled_text = f"{emoji} {in_special}\n\n{body_text}"
-                blocks.append(callout_block(titled_text, emoji=emoji, color=color))
+                # heading_3 gives the section a visible, scannable title above the callout
+                blocks.append(heading_block(f"{emoji}  {in_special}", level=3))
+                blocks.append(callout_block(body_text, emoji=emoji, color=color))
             blocks.append(divider_block())
         in_special   = None
         special_body = []
