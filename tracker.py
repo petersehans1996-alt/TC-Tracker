@@ -326,7 +326,9 @@ def parse_analysis_to_blocks(analysis: str) -> list[dict]:
             emoji, color = SPECIAL_SECTIONS[in_special]
             body_text    = " ".join(special_body).strip()
             if body_text:
-                blocks.append(callout_block(body_text, emoji=emoji, color=color))
+                # Prepend the section title so the callout is self-explanatory
+                titled_text = f"{emoji} {in_special}\n\n{body_text}"
+                blocks.append(callout_block(titled_text, emoji=emoji, color=color))
             blocks.append(divider_block())
         in_special   = None
         special_body = []
